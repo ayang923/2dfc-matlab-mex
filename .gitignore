@@ -1,0 +1,9 @@
+**.DS_Store
+.vscode/*
+.claude/
+
+# build artifacts
+csrc/out/
+csrc/bin/
+src/private/*.mex*
+*.o
