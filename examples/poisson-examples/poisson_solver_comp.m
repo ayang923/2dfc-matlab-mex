@@ -3,8 +3,8 @@ clc; clear; close all;
 %% 2D-FC Corner Solver
 d       = 10;
 h       = 0.0005;
-n_x     = 1111;
-n_y     = 2200;
+n_x     = 1120;
+n_y     = 2240;
 int_eps = 1e-11;
 
 u_boundary = @(x, y) sin(80*pi*x - 1) .* sin(80*pi*y - 1);
@@ -41,9 +41,7 @@ curve_seq.add_curve(l_1, l_2, l_1_prime, l_2_prime, l_1_dprime, l_2_dprime, ...
     0, n_frac_C, n_frac_C, n_frac_S, n_frac_S, h*2);
 
 rng('default')
-tic
-[u_2dfc, R, R_eval] = poisson_solver_coarse(curve_seq, f, u_boundary, h, 1, p, int_eps, 1e-13, 1e-13, d, C, n_r, A, Q, M, 0.01, n_x, n_y, true);
-toc
+[u_2dfc, R, R_eval] = poisson_solver_coarse(curve_seq, f, u_boundary, h, 1, p, int_eps, 1e-13, 1e-13, d, C, n_r, A, Q, M, 0.01, n_x, n_y, true, true);
 u_exact = u_boundary(R_eval.R_X, R_eval.R_Y); u_exact(~R_eval.in_interior) = nan;
 
 
@@ -58,7 +56,6 @@ z   = @(t) -1/4*sin(t) - 1i*g(t);
 dz  = @(t) -1/4*cos(t) - 1i*sin(t)./(4*g(t));
 dzz = @(t) 1/4*sin(t) + 1i*(sin(t).^2 - 4*cos(t).*g(t).^2)./(16*g(t).^3);
 
-tic
 n = 16;
 Gamma = Boundary(n, z, dz, dzz, [], quadrature='panel', tol=1e-12);
 Gamma = kdrefine(Gamma);
@@ -78,26 +75,13 @@ opts.tol = tol;
 solve_opts = [];
 solve_opts.tol = tol;
 
+Timer.reset()
 S = AdaptivePoissonSolver(Gamma, f, opts);
 u = S.solve(u_boundary);
 
 [u_fullap, ~, ~, ~] = S.sample(u, R_eval.R_X, R_eval.R_Y);
 u_fullap(~R_eval.in_interior) = NaN;
-toc
 
 max(abs(u_2dfc - u_exact), [], 'all')
 max(abs(u_fullap - u_exact), [], 'all')
-
-figure
-
-ids = leaves(S.tf);
-keep = [];
-for id = ids(:).'
-    if ( ~all(S.tf.coeffs{id} == 0, 'all') )
-        keep = [keep id];
-    end
-end
-
-plotOnly(S.tf, keep, boxes=true, values=false)
-axis equal off
 
