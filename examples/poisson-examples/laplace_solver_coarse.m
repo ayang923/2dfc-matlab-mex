@@ -1,4 +1,4 @@
-function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p, M, int_eps, eps_xi_eta, eps_xy, rho)
+function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p, M, int_eps, eps_xi_eta, eps_xy, rho, timing)
 % LAPLACE_SOLVER_COARSE  Solves Delta(u) = 0 and returns values on a coarser grid.
 %
 % Same BIE algorithm as laplace_solver, but the solution is evaluated on the
@@ -32,6 +32,10 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
 %   eps_xi_eta - Newton inversion tolerance in (xi,eta) space
 %   eps_xy     - Newton inversion tolerance in (x,y) space
 %   rho        - Patch-exclusion radius multiplier (in units of h)
+%   timing     - (optional) If true, print elapsed time for the boundary
+%   solve (BIE assembly/solve + interior-patch construction + near-boundary
+%   interpolation-node identification) and each of the three evaluation
+%   passes (well-interior, smooth-patch, corner-region). Default false.
 %
 % Output:
 %   u_num_mat - (n_y_eval x n_x_eval) solution values on R_eval; NaN outside domain
@@ -44,9 +48,14 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
     % tens of refinement rounds, not thousands.
     MAX_RHO_IE = 10000;
 
+    if ~exist('timing', 'var') || isempty(timing)
+        timing = false;
+    end
+
     % ------------------------------------------------------------------ %
     % Build boundary quadrature                                           %
     % ------------------------------------------------------------------ %
+    if timing; t_step = tic; end
     curve_n_rho1 = zeros(curve_seq.n_curves, 1);
     curr = curve_seq.first_curve;
     for i = 1:curve_seq.n_curves
@@ -107,10 +116,12 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
         interpol_nodes_x = [interpol_nodes_x; interpol_nodes_x_patch];
         interpol_nodes_y = [interpol_nodes_y; interpol_nodes_y_patch];
     end
+    if timing; fprintf('laplace_solver_coarse: boundary solve: %.3fs\n', toc(t_step)); end
 
     % ------------------------------------------------------------------ %
     % Evaluate well-interior points with adaptive IE refinement           %
     % ------------------------------------------------------------------ %
+    if timing; t_step = tic; end
     u_num_mat      = zeros(size(R_eval.f_R));
     u_num_mat_fine = zeros(size(R_eval.f_R));
 
@@ -138,10 +149,12 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
             'Hit max IE refinement level (rho=%d) with %d well-interior point(s) still not converged to int_eps=%.3e (max residual = %.3e); using best available value.', ...
             MAX_RHO_IE, sum(to_update, 'all'), int_eps, max(resid(to_update)));
     end
+    if timing; fprintf('laplace_solver_coarse: evaluation of interior points: %.3fs\n', toc(t_step)); end
 
     % ------------------------------------------------------------------ %
     % Evaluate interpolation-node values (near-boundary patch rows)       %
     % ------------------------------------------------------------------ %
+    if timing; t_step = tic; end
     disp('laplace_solver_coarse: evaluating smooth patch points');
 
     rho_coarse_IE      = rho_fine_IE;
@@ -196,10 +209,12 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
         u_num_mat(interpol_target_idx(idx)) = barylag( ...
             [(0:(M-1))' * R.h, interpol_u(idx, :)'], interpol_target_eta(idx));
     end
+    if timing; fprintf('laplace_solver_coarse: smooth patch evaluation: %.3fs\n', toc(t_step)); end
 
     % ------------------------------------------------------------------ %
     % Evaluate corner-region points with adaptive IE refinement           %
     % ------------------------------------------------------------------ %
+    if timing; t_step = tic; end
     disp('laplace_solver_coarse: evaluating corner points');
     c_pts_msk = R_eval.in_interior & ~well_interior_msk;
     for i = 1:length(s_patch_msks)
@@ -239,6 +254,7 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
     end
 
     u_num_mat(R_idxs_c_left) = u_corner_coarse;
+    if timing; fprintf('laplace_solver_coarse: corner point evaluation: %.3fs\n', toc(t_step)); end
 
     u_num_mat(~R_eval.in_interior) = nan;
 end

@@ -1,4 +1,4 @@
-function [u_num_mat] = laplace_solver(R, curve_seq, u_G, cfac, p, M, int_eps, eps_xi_eta, eps_xy, rho, corner_r)
+function [u_num_mat] = laplace_solver(R, curve_seq, u_G, cfac, p, M, int_eps, eps_xi_eta, eps_xy, rho, corner_r, timing)
 % LAPLACE_SOLVER  Solves Delta(u) = 0 on a 2D domain with Dirichlet boundary data.
 %
 % Uses a 2nd-kind Fredholm boundary integral equation (BIE) formulation.
@@ -56,6 +56,10 @@ function [u_num_mat] = laplace_solver(R, curve_seq, u_G, cfac, p, M, int_eps, ep
 %   corner_r   - All points within corner_r of a corner are evaluated with
 %   direct refinement rather than polynomial interpolation. If not given,
 %   set to M*h
+%   timing     - (optional) If true, print elapsed time for the boundary
+%   solve (BIE assembly/solve + interior-patch construction) and each of
+%   the three evaluation passes (well-interior, smooth-patch, corner-region).
+%   Default false.
 %
 % Output:
 %   u_num_mat - (n_y x n_x) matrix of solution values; NaN outside the domain
@@ -79,9 +83,14 @@ function [u_num_mat] = laplace_solver(R, curve_seq, u_G, cfac, p, M, int_eps, ep
     % of tens of refinement rounds, not thousands.
     MAX_RHO_IE = 10000;
 
+    if ~exist('timing', 'var') || isempty(timing)
+        timing = false;
+    end
+
     % ------------------------------------------------------------------ %
     % Build boundary quadrature                                           %
     % ------------------------------------------------------------------ %
+    if timing; t_step = tic; end
     curve_n_rho1 = zeros(curve_seq.n_curves, 1);
     curr = curve_seq.first_curve;
     for i = 1:curve_seq.n_curves
@@ -106,10 +115,12 @@ function [u_num_mat] = laplace_solver(R, curve_seq, u_G, cfac, p, M, int_eps, ep
     end
 
     [well_interior_msk, s_patch_msks] = gen_R_msks(R, rho, s_patches, c_0_patches, c_1_patches, corner_r);
+    if timing; fprintf('laplace_solver: boundary solve: %.3fs\n', toc(t_step)); end
 
     % ------------------------------------------------------------------ %
     % Evaluate at well-interior points with adaptive IE refinement        %
     % ------------------------------------------------------------------ %
+    if timing; t_step = tic; end
     u_num_mat      = zeros(size(R.f_R));
     u_num_mat_fine = zeros(size(R.f_R));
 
@@ -137,10 +148,12 @@ function [u_num_mat] = laplace_solver(R, curve_seq, u_G, cfac, p, M, int_eps, ep
             'Hit max IE refinement level (rho=%d) with %d well-interior point(s) still not converged to int_eps=%.3e (max residual = %.3e); using best available value.', ...
             MAX_RHO_IE, sum(to_update, 'all'), int_eps, max(resid(to_update)));
     end
+    if timing; fprintf('laplace_solver: evaluation of interior points: %.3fs\n', toc(t_step)); end
 
     % ------------------------------------------------------------------ %
     % Evaluate smooth-patch points via patch-local interpolation          %
     % ------------------------------------------------------------------ %
+    if timing; t_step = tic; end
     disp('laplace_solver: evaluating smooth patch points');
 
     rho_coarse_IE    = rho_fine_IE;
@@ -223,10 +236,12 @@ function [u_num_mat] = laplace_solver(R, curve_seq, u_G, cfac, p, M, int_eps, ep
             end
         end
     end
+    if timing; fprintf('laplace_solver: smooth patch evaluation: %.3fs\n', toc(t_step)); end
 
     % ------------------------------------------------------------------ %
     % Evaluate corner-region points with adaptive IE refinement           %
     % ------------------------------------------------------------------ %
+    if timing; t_step = tic; end
     c_pts_msk = R.in_interior & ~well_interior_msk;
     for i = 1:length(s_patch_msks)
         c_pts_msk = c_pts_msk & ~s_patch_msks{i};
@@ -270,6 +285,7 @@ function [u_num_mat] = laplace_solver(R, curve_seq, u_G, cfac, p, M, int_eps, ep
     end
 
     u_num_mat(R_idxs_c_left) = u_corner_coarse;
+    if timing; fprintf('laplace_solver: corner point evaluation: %.3fs\n', toc(t_step)); end
 
     u_num_mat(~R.in_interior) = nan;
 end

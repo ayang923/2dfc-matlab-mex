@@ -1,4 +1,4 @@
-function [R, interior_patches, FC_patches, fc_err] = FC2D(f, h, curve_seq, eps_xi_eta, eps_xy, d, C_S, n_r, A_S, Q_S, C_C, A_C, Q_C, M, n_x_padded, n_y_padded, perturb)
+function [R, interior_patches, FC_patches, fc_err] = FC2D(f, h, curve_seq, eps_xi_eta, eps_xy, d, C_S, n_r, A_S, Q_S, C_C, A_C, Q_C, M, n_x_padded, n_y_padded, perturb, timing)
 % FC2D  Computes a smooth Fourier continuation of f on an arbitrary 2D domain.
 %
 % The domain is described by a sequence of C^2 curves (curve_seq). The
@@ -32,6 +32,9 @@ function [R, interior_patches, FC_patches, fc_err] = FC2D(f, h, curve_seq, eps_x
 %   perturb    - (optional) Logical flag. If true, expand the bounding box by
 %                rand(1)*h on each side (random perturbation). If false or omitted,
 %                expand by the fixed amount h.
+%   timing     - (optional) If true, print elapsed time for the construction
+%                phase (patch construction through compute_fc_coeffs), not
+%                including the error-check evaluation below. Default false.
 %
 % Outputs:
 %   R               - R_cartesian_mesh_obj containing Cartesian mesh,
@@ -40,6 +43,11 @@ function [R, interior_patches, FC_patches, fc_err] = FC2D(f, h, curve_seq, eps_x
 %   FC_patches       - Cell array of 4 FC extension Q_patch_obj objects per
 %                      curve (1 from S, 3 from C)
 %   fc_err           - Relative L2 error of the Fourier approximation
+
+    if nargin < 18 || isempty(timing)
+        timing = false;
+    end
+    if timing; t_step = tic; end
 
     interior_patches = curve_seq.construct_patches(f, d, eps_xi_eta, eps_xy);
 
@@ -91,8 +99,7 @@ function [R, interior_patches, FC_patches, fc_err] = FC2D(f, h, curve_seq, eps_x
 
     R.fill_interior(f);
     R.compute_fc_coeffs();
-
-    toc
+    if timing; fprintf('FC2D: 2DFC construction: %.3fs\n', toc(t_step)); end
 
     % Evaluate error on a grid that is 2x finer than R.
     [R_X_err, R_Y_err, f_interpolation, interior_idx] = R.ifft_interpolation(2);
