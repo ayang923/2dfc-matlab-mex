@@ -199,46 +199,82 @@ against a naive, unsimplified re-derivation of the same formula (i.e. without th
 cancellation), and a physics identity — a double-layer potential with constant density is exactly
 1.0 at every point strictly inside the curve, independent of position.
 
-### Scoped follow-up: only the well-interior loop is batched
+### All four `u_num` evaluation sites are batched
 
-`laplace_solver`/`laplace_solver_coarse` have three kinds of `u_num` evaluation loops:
+`laplace_solver`/`laplace_solver_coarse` have four sites that repeatedly evaluate `u_num` under
+adaptive refinement: the well-interior pass, the patch-grid-fill loop (`laplace_solver`) /
+near-boundary interpolation-node loop (`laplace_solver_coarse`), and the corner-region loop. All
+four were rewritten to the same pattern: every point in the current "active" (not-yet-converged)
+set is evaluated together via `u_num_batch` at a shared `(curve_param, gr_phi)` resolution; points
+that converge (two successive resolutions agree to within `int_eps`) are frozen at their value and
+dropped from the active set; the rest move on to the next resolution together. This is a real
+reduction in MATLAB-loop and mex-call overhead everywhere, not just a faster inner kernel.
 
-- The **well-interior** initial pass and refinement pass: every point in a given pass shares the
-  same `(curve_param, gr_phi)` resolution with no per-point branching, so these were rewritten to
-  call `u_num_batch` once per pass instead of looping scalar `u_num` calls — a real reduction in
-  MATLAB-loop and mex-call overhead, not just a faster inner kernel.
-- The **patch-grid-fill** loop (`laplace_solver`) and **near-boundary interpolation-node** loop
-  (`laplace_solver_coarse`), and the **corner-region** loop (both): each point runs its own
-  independent adaptive while-loop, refining until *it personally* converges, not synchronized with
-  any other point's refinement level. Restructuring these into the well-interior loop's
-  shared-refinement-mask pattern was explicitly scoped out of this pass (by design decision, not
-  an oversight) — they keep their exact original control flow and only benefit from `u_num`'s own
-  now-mex-accelerated scalar dispatch. Given these loops touch far fewer points than the
-  well-interior pass in the validated examples, this is a reasonable place to stop; restructuring
-  them into a genuinely batched form (e.g. grouping points by common refinement level per
-  iteration) is a reasonable next step if a workload's corner/patch regions dominate runtime.
+This is safe to do everywhere, not just at the well-interior site, because the "coarse"/"fine"
+resolution state was *always* a single pair shared across every point at a given site, even in the
+original's per-point while-loops — points were processed one at a time, but they all read and
+advanced the *same* global resolution counter. Batching just evaluates every still-active point
+against that shared state at once, instead of visiting points one at a time and letting later
+points inherit whatever resolution an earlier point's demand happened to leave the shared state at.
+
+The practical consequence: a point's accepted value can differ slightly from the original, since it
+is now always checked starting from the same base resolution as every other point at its site
+(rather than possibly "free-riding" on a coarser-or-finer level some other point's demand left the
+shared state at when the original's sequential walk reached it). Both values satisfy the same
+`int_eps` stopping criterion, so the difference is bounded by a small multiple of `int_eps` — not
+multiple orders of magnitude smaller the way the well-interior site's difference is (see the
+Validation table below: ~1e-11 for well-interior-only vs. ~3-7x `int_eps` once the patch/corner
+sites are included, since convergence right at the geometry's corners is slower and doesn't
+"overshoot" the tolerance the way smooth well-interior evaluations do).
 
 ### Validation
 
 Comparing the original `2dfc-matlab` against this port on the teardrop example
 (`examples/poisson-examples/poisson_solver_teardrop.m`'s domain/problem, single self-junction
 curve, manufactured solution), both at reduced resolution to keep the pure-MATLAB baseline
-tractable:
+tractable, at `int_eps=1e-7` (matching the shipped driver scripts):
 
 | `h` | `d` | grid points | original | mex | speedup | max `u_num_mat` diff |
 |---|---|---|---|---|---|---|
-| 0.04 | 6 | 14,231 | 15.76s | 1.52s | **10.4x** | 5.1e-11 |
-| 0.02 | 6 | 29,045 | 10.44s | 2.24s | **4.7x** | 1.6e-12 |
+| 0.04 | 6 | 14,231 | 5.44s | 0.51s | **10.7x** | 3.0e-07 |
+| 0.02 | 6 | 29,045 | 9.98s | 0.68s | **14.6x** | 6.7e-07 |
 
-(The second row's smaller speedup, despite more grid points, is the expected signature of the
-scoped-out loops above: at finer boundary resolution, more of the total runtime shifts into the
-still-scalar-dispatched patch-grid-fill/corner-region loops relative to the batched well-interior
-pass.) `abs_max_err`/`rel_2_err` against the manufactured exact solution are bit-for-bit identical
-between original and mex in both rows (limited by discretization, not by this port). `IE_curve_seq_
-obj.u_num`/`u_num_batch` were additionally checked directly (bypassing the full FC2D+IE pipeline)
-against the original MATLAB on a synthetic `(curve_param, gr_phi)`, matching to 2.8e-16. The core
-FC2D port's own boomerang regression (see [Validation](#validation) above) was re-run after the
-`Curve_obj.get_mex_samples`/`build_curve_samples` refactor and shows no change in behavior.
+`abs_max_err`/`rel_2_err` against the manufactured exact solution agree to 4-5 significant figures
+between original and mex in both rows — both are dominated by the discretization error of this
+(deliberately coarse, for fast baseline comparison) test resolution, not by the `int_eps`-scale
+difference above. `IE_curve_seq_obj.u_num`/`u_num_batch` were additionally checked directly
+(bypassing the full FC2D+IE pipeline) against the original MATLAB on a synthetic
+`(curve_param, gr_phi)`, matching to 2.8e-16. The core FC2D port's own boomerang regression (see
+[Validation](#validation) above) was re-run after the `Curve_obj.get_mex_samples`/
+`build_curve_samples` refactor and shows no change in behavior.
+
+An earlier version of this port batched only the well-interior site and left the patch-grid-fill/
+corner-region loops as scalar per-point while-loops (still benefiting from `u_num`'s own mex
+dispatch, but not from batched evaluation). That version's `max u_num_mat diff` was ~1e-11 to
+5e-11 — far below `int_eps` — at the cost of a smaller speedup (4.7-10.4x) since more of the
+runtime at finer boundary resolutions sat in the unbatched loops. Batching all four sites trades a
+small, `int_eps`-bounded amount of order-dependence for a meaningfully larger speedup; if a
+workload needs the tighter, closer-to-the-original numerical match instead, reverting the
+patch-grid-fill/corner-region loops to scalar `u_num` calls (still mex-dispatched) is
+straightforward.
+
+**Multi-curve / concave-corner check**: the teardrop domain above has one self-junction curve with
+a single convex corner. `laplace_solver`'s corner-region loop was additionally checked on
+`examples/poisson-examples/poisson_solver_guitarbase.m`'s 4-curve domain (which has *concave*
+corners) at a reduced test resolution (`h=0.006`, `d=5`, `int_eps=1e-7`, vs. the shipped
+`h=0.004`). The batched result matched the uncapped original almost exactly (3.670e-05 vs.
+3.668e-05 `abs_max_err`), confirming the batching logic itself is correct on this harder geometry
+too — but this test also surfaced a real, pre-existing property of the algorithm worth knowing:
+points evaluated very close to a concave curve junction can need well over 100 IE refinement
+levels (`rho_fine_IE`) to converge to a tight `int_eps`, far more than the single-digit-to-low-tens
+levels the teardrop/well-interior cases ever need. `laplace_solver.m`/`laplace_solver_coarse.m`
+cap `rho_fine_IE` at `MAX_RHO_IE=100` (a hard ceiling against runaway/infinite refinement, with a
+`warning('...:maxRhoIE', ...)` raised and the best-available value used for any point still
+unconverged when the cap is hit); the reduced-resolution guitarbase check above hit exactly this
+cap for 2 corner points, producing a large local error (`abs_max_err=0.31`) until the cap was
+raised for that check. If a domain has sharp concave corners and near-corner accuracy matters,
+raise `MAX_RHO_IE` (or watch for the warning and treat it as a signal to do so); the cap trades
+worst-case accuracy at pathological corner points for a hard bound on runtime.
 
 ## Building
 
@@ -280,7 +316,10 @@ cd csrc && make test
 ├── data/FC_data/           Precomputed FC continuation matrices (same as 2dfc-matlab)
 └── examples/
     ├── 2DFC-examples/      Same FC2D example scripts as 2dfc-matlab
-    └── poisson-examples/   Same Poisson/IE example scripts as 2dfc-matlab (.mat outputs gitignored)
+    └── poisson-examples/   Poisson/IE solver (curve_param_obj, IE_curve_obj,
+                             IE_curve_seq_obj, poisson_solver(_coarse), laplace_solver
+                             (_coarse)) plus driver scripts, same layout as
+                             2dfc-matlab (.mat outputs gitignored)
 ```
 
 ## Validation

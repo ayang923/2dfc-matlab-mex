@@ -46,7 +46,6 @@ function [u_num_mat, R] = poisson_solver(curve_seq, f, u_boundary, h, G_cf, p, i
     end
     if nargin >= 18;  fc2d_args{end+1} = perturb;  end
     if nargin >= 19
-        corner_r = corner_r;
     else
         corner_r = M*h;
     end

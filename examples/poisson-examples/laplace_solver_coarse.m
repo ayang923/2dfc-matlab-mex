@@ -10,14 +10,15 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
 % spacing h_thresh, the point is handled by polynomial interpolation from
 % M pre-computed layer values (at eta = 0, h_thresh, ..., (M-1)*h_thresh).
 %
-% As in laplace_solver, the well-interior initial-pass and refinement-pass
-% loops are batched via IE_curve_seq_obj.u_num_batch (mex-accelerated,
-% evaluating every not-yet-converged point at once since they all share the
-% same (curve_param, gr_phi) resolution within a pass). The near-boundary
-% interpolation-node loop and the corner-region loop keep their original
-% per-point independent while-loop structure unchanged (still call scalar
-% u_num, which now dispatches to mex internally) -- see laplace_solver.m
-% for the rationale.
+% As in laplace_solver, all four IE evaluation sites (well-interior,
+% near-boundary interpolation-node, corner-region) are batched via
+% IE_curve_seq_obj.u_num_batch (mex-accelerated): every point in the active
+% set is evaluated at a shared (curve_param, gr_phi) resolution, converged
+% points are frozen and dropped, and the remaining active points move on to
+% the next resolution together -- see laplace_solver.m's header comment for
+% why this is safe (the coarse/fine resolution state was always a single
+% pair shared across all points at a given site, even in the original
+% per-point while-loops).
 %
 % Inputs:
 %   R          - Fine R_cartesian_mesh_obj used for the FC step (h fine)
@@ -34,6 +35,14 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
 %
 % Output:
 %   u_num_mat - (n_y_eval x n_x_eval) solution values on R_eval; NaN outside domain
+
+    % Hard cap on the IE refinement level -- see laplace_solver.m's header
+    % comment for why this guards against an infinite loop and is shared
+    % across all evaluation sites below. Every rho_fine_IE advance uses
+    % next_rho_IE (step size scales with the current level's order of
+    % magnitude), so reaching this cap from rho=2 takes on the order of
+    % tens of refinement rounds, not thousands.
+    MAX_RHO_IE = 10000;
 
     % ------------------------------------------------------------------ %
     % Build boundary quadrature                                           %
@@ -112,15 +121,22 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
     to_update   = well_interior_msk;
     rho_fine_IE = 2;
 
-    while sum(to_update, 'all') > 0 || rho_fine_IE == 2
+    while (sum(to_update, 'all') > 0 || rho_fine_IE == 2) && rho_fine_IE <= MAX_RHO_IE
         [gr_phi_fine, curve_param_fine] = refine_gr_phi(curve_param_rho1, rho_fine_IE, gr_phi_fft_rho1);
 
         update_idxs = R_eval.R_idxs(to_update);
         u_num_mat_fine(update_idxs) = IE_curve_seq.u_num_batch(R_eval.R_X(update_idxs), R_eval.R_Y(update_idxs), curve_param_fine, gr_phi_fine);
 
-        to_update   = to_update & abs(u_num_mat_fine - u_num_mat) > int_eps;
+        resid = abs(u_num_mat_fine - u_num_mat);
+        to_update   = to_update & resid > int_eps;
         u_num_mat(to_update) = u_num_mat_fine(to_update);
-        rho_fine_IE = rho_fine_IE + 1;
+        rho_fine_IE = next_rho_IE(rho_fine_IE);
+    end
+
+    if sum(to_update, 'all') > 0
+        warning('laplace_solver_coarse:maxRhoIE', ...
+            'Hit max IE refinement level (rho=%d) with %d well-interior point(s) still not converged to int_eps=%.3e (max residual = %.3e); using best available value.', ...
+            MAX_RHO_IE, sum(to_update, 'all'), int_eps, max(resid(to_update)));
     end
 
     % ------------------------------------------------------------------ %
@@ -132,32 +148,45 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
     gr_phi_coarse      = gr_phi_fine;
     curve_param_coarse = curve_param_fine;
 
-    rho_fine_IE = rho_coarse_IE + 1;
+    rho_fine_IE = next_rho_IE(rho_coarse_IE);
     [gr_phi_fine, curve_param_fine] = refine_gr_phi(curve_param_rho1, rho_fine_IE, gr_phi_fft_rho1);
 
-    interpol_u = zeros(length(interpol_target_idx), M);
+    n_interpol_total = length(interpol_target_idx);
 
-    for eta_idx = M:-1:2
-        for xi_idx = 1:length(interpol_target_idx)
-            x = interpol_nodes_x(xi_idx, eta_idx);
-            y = interpol_nodes_y(xi_idx, eta_idx);
-            u_num_coarse_val = IE_curve_seq.u_num(x, y, curve_param_coarse, gr_phi_coarse);
-            u_num_fine_val   = IE_curve_seq.u_num(x, y, curve_param_fine,   gr_phi_fine);
+    sub_X = interpol_nodes_x(:, 2:M);
+    sub_Y = interpol_nodes_y(:, 2:M);
+    interpol_pt_x = sub_X(:);
+    interpol_pt_y = sub_Y(:);
 
-            while abs(u_num_coarse_val - u_num_fine_val) > int_eps
-                rho_coarse_IE      = rho_fine_IE;
-                curve_param_coarse = curve_param_fine;
-                gr_phi_coarse      = gr_phi_fine;
+    u_interpol_coarse = IE_curve_seq.u_num_batch(interpol_pt_x, interpol_pt_y, curve_param_coarse, gr_phi_coarse);
+    u_interpol_fine   = IE_curve_seq.u_num_batch(interpol_pt_x, interpol_pt_y, curve_param_fine,   gr_phi_fine);
 
-                rho_fine_IE = rho_coarse_IE + 1;
-                [gr_phi_fine, curve_param_fine] = refine_gr_phi(curve_param_rho1, rho_fine_IE, gr_phi_fft_rho1);
+    to_update = abs(u_interpol_coarse - u_interpol_fine) > int_eps;
 
-                u_num_coarse_val = u_num_fine_val;
-                u_num_fine_val   = IE_curve_seq.u_num(x, y, curve_param_fine, gr_phi_fine);
-            end
-            interpol_u(xi_idx, eta_idx) = u_num_coarse_val;
-        end
+    while any(to_update) && rho_fine_IE <= MAX_RHO_IE
+        u_interpol_coarse(to_update) = u_interpol_fine(to_update);
+
+        rho_coarse_IE      = rho_fine_IE;
+        curve_param_coarse = curve_param_fine;
+        gr_phi_coarse      = gr_phi_fine;
+
+        rho_fine_IE = next_rho_IE(rho_coarse_IE);
+        [gr_phi_fine, curve_param_fine] = refine_gr_phi(curve_param_rho1, rho_fine_IE, gr_phi_fft_rho1);
+
+        u_interpol_fine(to_update) = IE_curve_seq.u_num_batch( ...
+            interpol_pt_x(to_update), interpol_pt_y(to_update), curve_param_fine, gr_phi_fine);
+        resid = abs(u_interpol_coarse(to_update) - u_interpol_fine(to_update));
+        to_update(to_update) = resid > int_eps;
     end
+
+    if any(to_update)
+        warning('laplace_solver_coarse:maxRhoIE', ...
+            'Hit max IE refinement level (rho=%d) with %d interpolation-node point(s) still not converged to int_eps=%.3e (max residual = %.3e); using best available value.', ...
+            MAX_RHO_IE, sum(to_update), int_eps, max(resid(resid > int_eps)));
+    end
+
+    interpol_u = zeros(n_interpol_total, M);
+    interpol_u(:, 2:M) = reshape(u_interpol_coarse, n_interpol_total, M-1);
 
     % Boundary row: enforce exact Dirichlet data
     interpol_u(:, 1) = u_G(interpol_nodes_x(:, 1), interpol_nodes_y(:, 1));
@@ -179,36 +208,37 @@ function [u_num_mat] = laplace_solver_coarse(R, R_eval, curve_seq, u_G, cfac, p,
 
     R_idxs_c_left = R_eval.R_idxs(c_pts_msk);
 
-    dist_to_boundary = zeros(size(R_idxs_c_left));
-    for i = 1:length(R_idxs_c_left)
-        dist_to_boundary(i) = sqrt(min( ...
-            (R_eval.boundary_X - R_eval.R_X(R_idxs_c_left(i))).^2 + ...
-            (R_eval.boundary_Y - R_eval.R_Y(R_idxs_c_left(i))).^2));
+    % Batched adaptive refinement -- see laplace_solver.m's corner-region
+    % loop for why the original's distance-to-boundary traversal order is
+    % no longer needed once every still-active point is refined together.
+    u_corner_coarse = IE_curve_seq.u_num_batch(R_eval.R_X(R_idxs_c_left), R_eval.R_Y(R_idxs_c_left), curve_param_coarse, gr_phi_coarse);
+    u_corner_fine   = IE_curve_seq.u_num_batch(R_eval.R_X(R_idxs_c_left), R_eval.R_Y(R_idxs_c_left), curve_param_fine,   gr_phi_fine);
+
+    to_update = abs(u_corner_coarse - u_corner_fine) > int_eps;
+
+    while any(to_update) && rho_fine_IE <= MAX_RHO_IE
+        u_corner_coarse(to_update) = u_corner_fine(to_update);
+
+        rho_coarse_IE      = rho_fine_IE;
+        curve_param_coarse = curve_param_fine;
+        gr_phi_coarse      = gr_phi_fine;
+
+        rho_fine_IE = next_rho_IE(rho_coarse_IE);
+        [gr_phi_fine, curve_param_fine] = refine_gr_phi(curve_param_rho1, rho_fine_IE, gr_phi_fft_rho1);
+
+        idxs_active = R_idxs_c_left(to_update);
+        u_corner_fine(to_update) = IE_curve_seq.u_num_batch(R_eval.R_X(idxs_active), R_eval.R_Y(idxs_active), curve_param_fine, gr_phi_fine);
+        resid = abs(u_corner_coarse(to_update) - u_corner_fine(to_update));
+        to_update(to_update) = resid > int_eps;
     end
 
-    [~, trav_order]  = sort(dist_to_boundary, 'descend');
-    R_idxs_c_left    = R_idxs_c_left(trav_order);
-
-    for i = 1:size(R_idxs_c_left, 1)
-        x = R_eval.R_X(R_idxs_c_left(i));
-        y = R_eval.R_Y(R_idxs_c_left(i));
-
-        u_num_coarse_val = IE_curve_seq.u_num(x, y, curve_param_coarse, gr_phi_coarse);
-        u_num_fine_val   = IE_curve_seq.u_num(x, y, curve_param_fine,   gr_phi_fine);
-
-        while abs(u_num_coarse_val - u_num_fine_val) > int_eps
-            rho_coarse_IE      = rho_fine_IE;
-            curve_param_coarse = curve_param_fine;
-            gr_phi_coarse      = gr_phi_fine;
-
-            rho_fine_IE = rho_coarse_IE + 1;
-            [gr_phi_fine, curve_param_fine] = refine_gr_phi(curve_param_rho1, rho_fine_IE, gr_phi_fft_rho1);
-
-            u_num_coarse_val = u_num_fine_val;
-            u_num_fine_val   = IE_curve_seq.u_num(x, y, curve_param_fine, gr_phi_fine);
-        end
-        u_num_mat(R_idxs_c_left(i)) = u_num_coarse_val;
+    if any(to_update)
+        warning('laplace_solver_coarse:maxRhoIE', ...
+            'Hit max IE refinement level (rho=%d) with %d corner-region point(s) still not converged to int_eps=%.3e (max residual = %.3e); using best available value.', ...
+            MAX_RHO_IE, sum(to_update), int_eps, max(resid(resid > int_eps)));
     end
+
+    u_num_mat(R_idxs_c_left) = u_corner_coarse;
 
     u_num_mat(~R_eval.in_interior) = nan;
 end
@@ -226,6 +256,19 @@ function [gr_phi_rho, curve_param_rho] = refine_gr_phi(curve_param_rho1, rho_IE,
         gr_phi_fft_rho1; ...
         zeros(floor((n_fine - n_base) / 2), 1)];
     gr_phi_rho = rho_IE * n_base * real(ifft(ifftshift(padded_fft_coeffs)));
+end
+
+% =========================================================================
+
+function rho_next = next_rho_IE(rho)
+% NEXT_RHO_IE  Advances the IE refinement level with a step size that scales
+% with rho's current order of magnitude -- see laplace_solver.m's copy of
+% this function for the rationale.
+    step = 1;
+    while rho >= step * 10
+        step = step * 10;
+    end
+    rho_next = rho + step;
 end
 
 % =========================================================================

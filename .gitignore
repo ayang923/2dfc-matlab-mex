@@ -6,4 +6,5 @@
 csrc/out/
 csrc/bin/
 src/private/*.mex*
+examples/poisson-examples/private/*.mex*
 *.o
