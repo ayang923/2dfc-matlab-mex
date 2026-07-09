@@ -147,6 +147,99 @@ directly with an arbitrary `M_p`/`J` (not through `Curve_obj`, so it has no `mex
 function falls back to the exact original pure-MATLAB implementation — just slower, never wrong or
 unavailable.
 
+## Poisson / boundary-integral-equation solver
+
+`2dfc-matlab`'s `examples/poisson-examples/` layers a Poisson solver on top of the FC2D core
+above: `Delta(u) = f` with Dirichlet boundary data is split into (1) a particular solution `u_p`
+via the already-mex-accelerated `FC2D`/`R_cartesian_mesh_obj.inv_lap`, and (2) a homogeneous
+correction `u_h` (`Delta(u_h)=0`, `u_h|boundary = u_boundary - u_p|boundary`) solved with a
+self-contained 2nd-kind Fredholm boundary-integral-equation (Nyström double-layer-potential)
+solver (`curve_param_obj`, `IE_curve_obj`, `IE_curve_seq_obj`, driven by `laplace_solver.m`/
+`laplace_solver_coarse.m`/`poisson_solver.m`/`poisson_solver_coarse.m`). Unlike the FC2D core
+above, there was no existing C reference implementation to port from here — the C kernels below
+were designed from scratch directly from the MATLAB algorithm.
+
+### What's accelerated, and why
+
+| File | Status |
+|---|---|
+| `IE_curve_seq_obj.m` | `u_num` dispatches to `ie_u_num_mex`; new `u_num_batch` method dispatches to `ie_u_num_batch_mex` (both fall back to pure MATLAB) |
+| `R_cartesian_mesh_obj.m` | new `locally_compute_vec` method dispatches to `r_cartesian_mesh_locally_compute_vec_mex` |
+| `IE_curve_obj.m` | `construct_interior_patch` builds a `mex_spec` (reusing `PATCH_KIND_S` verbatim — see below) so its `Q_patch_obj`-based interior patches get the same Newton-inversion/interpolation acceleration as the FC2D core |
+| `curve_param_obj.m` | unchanged — pure bookkeeping |
+| `poisson_solver.m`, `poisson_solver_coarse.m`, `laplace_solver.m`, `laplace_solver_coarse.m` | unchanged algorithm; call the new accelerated methods above instead of the original's scalar loops / local helper function |
+
+Three things fell out of directly reading this algorithm (rather than a C reference) that shaped
+the design:
+
+1. **No curve-sampling bridge needed for the IE evaluation itself.** `IE_curve_obj.u_num`/
+   `K_general` only ever evaluate a curve at its fixed, exactly-computable Kress sigmoidal
+   quadrature mesh (`theta_mesh`) — never at an arbitrary, Newton-iterate-dependent point the way
+   `R_xi_eta_inversion` needs for FC2D. So `ie_kernels.c` takes plain flat `double*` arrays that
+   MATLAB fills in once per (curve, resolution) from the *exact* closures — no interpolation, no
+   `curve_eval.c` involvement. The curve-sampling bridge is reused only for
+   `IE_curve_obj.construct_interior_patch`, which *does* need Newton inversion and reuses
+   `PATCH_KIND_S` from `patch_kernels.c` unmodified (its `M_p`/`J` is the identical closed-form
+   inward-normal-offset template `Curve_obj.construct_S_patch` already uses).
+2. **An exact algebraic simplification.** `K_general`'s `nu_norm = sqrt(l1p^2+l2p^2)` denominator
+   cancels exactly against the same `sqrt(l1p^2+l2p^2)` arc-length factor in the quadrature weight,
+   so `ie_kernels.c`'s inner loop needs no `sqrt` and no per-curve looping — just one flat sum over
+   all `n_total` quadrature nodes:
+   `sum_k weight[k] * [(x-l1[k])*l2p[k] - (y-l2[k])*l1p[k]] / [(x-l1[k])^2 + (y-l2[k])^2]`,
+   `weight[k] = -1/(2*pi) * gr_phi[k] * ds[k]`. This is an identity, not an approximation.
+3. **`construct_A_b`'s dense assembly and the `A\b` solve are not bottlenecks worth porting.**
+   Assembly is already fully vectorized (no scalar loop; `n_curves` is 1-4), `n_total` tops out at
+   a few thousand nodes even at the finest shipped resolution, and the backslash is already
+   LAPACK-backed — reimplementing it without Intel MKL would just rebuild what
+   Accelerate/OpenBLAS already does for free.
+
+New from-scratch correctness checks (no C reference to diff against, so `csrc/examples/
+smoke_test.c`'s `test_ie_u_num` validates two independent ways): `ie_u_num`/`ie_u_num_batch`
+against a naive, unsimplified re-derivation of the same formula (i.e. without the `nu_norm`
+cancellation), and a physics identity — a double-layer potential with constant density is exactly
+1.0 at every point strictly inside the curve, independent of position.
+
+### Scoped follow-up: only the well-interior loop is batched
+
+`laplace_solver`/`laplace_solver_coarse` have three kinds of `u_num` evaluation loops:
+
+- The **well-interior** initial pass and refinement pass: every point in a given pass shares the
+  same `(curve_param, gr_phi)` resolution with no per-point branching, so these were rewritten to
+  call `u_num_batch` once per pass instead of looping scalar `u_num` calls — a real reduction in
+  MATLAB-loop and mex-call overhead, not just a faster inner kernel.
+- The **patch-grid-fill** loop (`laplace_solver`) and **near-boundary interpolation-node** loop
+  (`laplace_solver_coarse`), and the **corner-region** loop (both): each point runs its own
+  independent adaptive while-loop, refining until *it personally* converges, not synchronized with
+  any other point's refinement level. Restructuring these into the well-interior loop's
+  shared-refinement-mask pattern was explicitly scoped out of this pass (by design decision, not
+  an oversight) — they keep their exact original control flow and only benefit from `u_num`'s own
+  now-mex-accelerated scalar dispatch. Given these loops touch far fewer points than the
+  well-interior pass in the validated examples, this is a reasonable place to stop; restructuring
+  them into a genuinely batched form (e.g. grouping points by common refinement level per
+  iteration) is a reasonable next step if a workload's corner/patch regions dominate runtime.
+
+### Validation
+
+Comparing the original `2dfc-matlab` against this port on the teardrop example
+(`examples/poisson-examples/poisson_solver_teardrop.m`'s domain/problem, single self-junction
+curve, manufactured solution), both at reduced resolution to keep the pure-MATLAB baseline
+tractable:
+
+| `h` | `d` | grid points | original | mex | speedup | max `u_num_mat` diff |
+|---|---|---|---|---|---|---|
+| 0.04 | 6 | 14,231 | 15.76s | 1.52s | **10.4x** | 5.1e-11 |
+| 0.02 | 6 | 29,045 | 10.44s | 2.24s | **4.7x** | 1.6e-12 |
+
+(The second row's smaller speedup, despite more grid points, is the expected signature of the
+scoped-out loops above: at finer boundary resolution, more of the total runtime shifts into the
+still-scalar-dispatched patch-grid-fill/corner-region loops relative to the batched well-interior
+pass.) `abs_max_err`/`rel_2_err` against the manufactured exact solution are bit-for-bit identical
+between original and mex in both rows (limited by discretization, not by this port). `IE_curve_seq_
+obj.u_num`/`u_num_batch` were additionally checked directly (bypassing the full FC2D+IE pipeline)
+against the original MATLAB on a synthetic `(curve_param, gr_phi)`, matching to 2.8e-16. The core
+FC2D port's own boomerang regression (see [Validation](#validation) above) was re-run after the
+`Curve_obj.get_mex_samples`/`build_curve_samples` refactor and shows no change in behavior.
+
 ## Building
 
 Requires a C11 compiler MATLAB's `mex` recognizes, and a CBLAS implementation:
@@ -179,13 +272,15 @@ cd csrc && make test
 │   └── private/            Compiled mex binaries land here (build_mex output)
 ├── csrc/                   Portable C kernels (no MKL/Intel compiler needed)
 │   ├── include/, src/      num_linalg, curve_eval, patch_kernels, fc_kernels,
-│   │                       grid_interp, cartesian_kernels, blas_compat
+│   │                       grid_interp, cartesian_kernels, ie_kernels, blas_compat
 │   ├── examples/           smoke_test.c (standalone correctness checks)
 │   └── Makefile
 ├── mex/                    Thin mexFunction gateways over csrc/, plus mex_common
 ├── build_mex.m             Top-level build script
 ├── data/FC_data/           Precomputed FC continuation matrices (same as 2dfc-matlab)
-└── examples/               Same example scripts as 2dfc-matlab
+└── examples/
+    ├── 2DFC-examples/      Same FC2D example scripts as 2dfc-matlab
+    └── poisson-examples/   Same Poisson/IE example scripts as 2dfc-matlab (.mat outputs gitignored)
 ```
 
 ## Validation

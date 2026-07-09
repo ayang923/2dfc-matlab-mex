@@ -92,6 +92,8 @@ function [R, interior_patches, FC_patches, fc_err] = FC2D(f, h, curve_seq, eps_x
     R.fill_interior(f);
     R.compute_fc_coeffs();
 
+    toc
+
     % Evaluate error on a grid that is 2x finer than R.
     [R_X_err, R_Y_err, f_interpolation, interior_idx] = R.ifft_interpolation(2);
     f_exact = f(R_X_err, R_Y_err);

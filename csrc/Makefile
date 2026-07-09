@@ -9,7 +9,7 @@ else
     LDFLAGS += -lopenblas -lm
 endif
 
-LIBS = num_linalg curve_eval patch_kernels fc_kernels grid_interp cartesian_kernels
+LIBS = num_linalg curve_eval patch_kernels fc_kernels grid_interp cartesian_kernels ie_kernels
 OBJS = $(addprefix out/,$(LIBS:=.o))
 
 all: bin/smoke_test

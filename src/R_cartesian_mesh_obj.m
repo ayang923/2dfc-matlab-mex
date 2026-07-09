@@ -223,6 +223,32 @@ classdef R_cartesian_mesh_obj < handle
             f_xy = barylag([interpol_y_mesh, interpol_x_exact], y);
         end
 
+        function vals = locally_compute_vec(obj, X, Y, M)
+            % LOCALLY_COMPUTE_VEC  Evaluates locally_compute element-wise over
+            % arrays X, Y (same shape) in one call when mex is available,
+            % instead of a MATLAB-interpreted loop -- this is the poisson
+            % solver's single biggest bottleneck (poisson_solver_coarse.m
+            % evaluates the particular solution over the entire, potentially
+            % multi-million-point, coarse evaluation grid this way). Reuses
+            % the same grid_locally_compute C kernel already used internally
+            % by interpolate_patch, just looped over an explicit target array
+            % instead of a patch-derived one.
+            %
+            % Fallback (no mex) loops calling the existing scalar
+            % locally_compute, i.e. exactly what callers did before this
+            % method existed.
+            if use_mex_2dfc()
+                vals = r_cartesian_mesh_locally_compute_vec_mex( ...
+                    obj.x_start, obj.x_end, obj.y_start, obj.y_end, obj.f_R, X, Y, M);
+                return
+            end
+
+            vals = zeros(size(X));
+            for i = 1:numel(X)
+                vals(i) = obj.locally_compute(X(i), Y(i), M);
+            end
+        end
+
         function compute_fc_coeffs(obj)
             % COMPUTE_FC_COEFFS  Computes the 2D Fourier coefficients of f_R.
             %

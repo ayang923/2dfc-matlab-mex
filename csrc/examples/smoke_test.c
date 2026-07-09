@@ -10,6 +10,7 @@
 #include "cartesian_kernels.h"
 #include "curve_eval.h"
 #include "fc_kernels.h"
+#include "ie_kernels.h"
 #include "num_linalg.h"
 #include "patch_kernels.h"
 
@@ -251,12 +252,104 @@ static void test_fcont_gram_blend_S(void) {
     check("fcont_gram_blend_S matches naive reference", ok);
 }
 
+/* No existing C code implements this solver anywhere (unlike the rest of
+ * this file's kernels, which mirror the 2dfc-c reference), so there's no
+ * "port fidelity" check available. Instead: (1) validate ie_u_num's
+ * cancelled-nu_norm shortcut against a literal, unsimplified
+ * reimplementation of the original MATLAB formula (the one nontrivial
+ * algebraic step in this new kernel), (2) check the batched entry point
+ * matches the scalar one, (3) a physics sanity check: the double-layer
+ * potential of a constant density over a closed curve is the same at every
+ * interior point (a real, assumption-light property of this kernel, not a
+ * hardcoded expected value/sign). */
+static double ie_u_num_naive(double x, double y,
+                              const double *l1, const double *l2,
+                              const double *l1p, const double *l2p,
+                              const double *gr_phi, double ds, int n_total) {
+    double sum = 0.0;
+    for (int k = 0; k < n_total; k++) {
+        double dx = x - l1[k];
+        double dy = y - l2[k];
+        double num = dx * l2p[k] - dy * l1p[k];
+        double nu = sqrt(l1p[k]*l1p[k] + l2p[k]*l2p[k]);
+        double dist2 = dx*dx + dy*dy;
+        double K = -1.0 / (2.0*M_PI) * num / (nu * dist2);
+        sum += K * gr_phi[k] * nu * ds;
+    }
+    return sum;
+}
+
+static void fill_unit_circle(int n, double *l1, double *l2, double *l1p, double *l2p) {
+    for (int k = 0; k < n; k++) {
+        double theta = (2.0*M_PI*k) / n;
+        l1[k] = cos(theta);
+        l2[k] = sin(theta);
+        l1p[k] = -2.0*M_PI*sin(theta) / 1.0; /* d(l1)/d(theta_normalized) style scaling doesn't matter for this test */
+        l2p[k] =  2.0*M_PI*cos(theta);
+    }
+}
+
+static void test_ie_u_num(void) {
+    const int n = 64;
+    double l1[64], l2[64], l1p[64], l2p[64], gr_phi[64], weight[64];
+    fill_unit_circle(n, l1, l2, l1p, l2p);
+    double ds = 1.0 / n;
+    for (int k = 0; k < n; k++) {
+        gr_phi[k] = 2.0 + sin(3.0 * (2.0*M_PI*k)/n);
+        weight[k] = -1.0/(2.0*M_PI) * gr_phi[k] * ds;
+    }
+
+    double test_pts_x[3] = {0.3, -0.2, 0.05};
+    double test_pts_y[3] = {0.1, 0.4, -0.15};
+    double max_err = 0.0;
+    for (int i = 0; i < 3; i++) {
+        double got = ie_u_num(test_pts_x[i], test_pts_y[i], l1, l2, l1p, l2p, weight, n);
+        double expect = ie_u_num_naive(test_pts_x[i], test_pts_y[i], l1, l2, l1p, l2p, gr_phi, ds, n);
+        double err = fabs(got - expect);
+        if (err > max_err) max_err = err;
+    }
+    check_close("ie_u_num matches naive (unsimplified) formula", max_err, 0.0, 1e-12);
+
+    /* batched vs scalar */
+    double batch_out[3];
+    ie_u_num_batch(test_pts_x, test_pts_y, 3, l1, l2, l1p, l2p, weight, n, batch_out);
+    double max_batch_err = 0.0;
+    for (int i = 0; i < 3; i++) {
+        double scalar_val = ie_u_num(test_pts_x[i], test_pts_y[i], l1, l2, l1p, l2p, weight, n);
+        double err = fabs(batch_out[i] - scalar_val);
+        if (err > max_batch_err) max_batch_err = err;
+    }
+    check_close("ie_u_num_batch matches scalar ie_u_num", max_batch_err, 0.0, 1e-15);
+
+    /* Physics sanity check: constant density -> position-independent value
+     * for interior points (finer discretization for a tighter check). */
+    const int n_fine = 4000;
+    double *l1f = malloc(n_fine*sizeof(double));
+    double *l2f = malloc(n_fine*sizeof(double));
+    double *l1pf = malloc(n_fine*sizeof(double));
+    double *l2pf = malloc(n_fine*sizeof(double));
+    double *weightf = malloc(n_fine*sizeof(double));
+    fill_unit_circle(n_fine, l1f, l2f, l1pf, l2pf);
+    double dsf = 1.0 / n_fine;
+    for (int k = 0; k < n_fine; k++) {
+        weightf[k] = -1.0/(2.0*M_PI) * 1.0 * dsf; /* constant density gr_phi = 1 */
+    }
+    double v1 = ie_u_num(0.3, 0.1, l1f, l2f, l1pf, l2pf, weightf, n_fine);
+    double v2 = ie_u_num(-0.5, 0.2, l1f, l2f, l1pf, l2pf, weightf, n_fine);
+    double v3 = ie_u_num(0.0, 0.0, l1f, l2f, l1pf, l2pf, weightf, n_fine);
+    printf("[INFO] constant-density double-layer potential at 3 interior points: %.10g, %.10g, %.10g\n", v1, v2, v3);
+    check_close("constant-density double-layer potential is position-independent inside the curve",
+                fmax(fabs(v1-v2), fabs(v1-v3)), 0.0, 1e-6);
+    free(l1f); free(l2f); free(l1pf); free(l2pf); free(weightf);
+}
+
 int main(void) {
     test_sampled_fn_eval();
     test_s_patch_inverse();
     test_c_patch_inverse();
     test_inpolygon_mesh();
     test_fcont_gram_blend_S();
+    test_ie_u_num();
 
     printf("\n%s (%d failure(s))\n", g_failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED", g_failures);
     return g_failures == 0 ? 0 : 1;
