@@ -67,8 +67,8 @@ function build_mex()
             mkl_libdir = fullfile(mkl_root, 'lib');
         end
         inc_flags = [inc_flags, {['-I' fullfile(mkl_root, 'include')], '-DUSE_MKL_CBLAS'}];
-        extra_flags = {['-L' mkl_libdir], '-Wl,--no-as-needed', ...
-            '-lmkl_intel_lp64', '-lmkl_sequential', '-lmkl_core', '-lpthread', '-lm', '-ldl'};
+        extra_flags = {sprintf(['LDFLAGS=$LDFLAGS -L%s -Wl,--no-as-needed ' ...
+            '-lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl'], mkl_libdir)};
     elseif isunix
         extra_flags = {'-lopenblas'};
     else
