@@ -76,12 +76,21 @@ function build_mex()
         % file's exported dynamic symbol table (--exclude-libs) avoids
         % this entirely -- our mex never touches the process-wide symbol
         % table for these names, so it can't collide either direction.
+        %
+        % Must be appended via LINKLIBS, not LDFLAGS: this mex template
+        % places $LDFLAGS *before* the compiled objects on the final link
+        % line, so a static archive placed there gets dropped by ld's
+        % single left-to-right pass before it ever reaches the object
+        % files that need its symbols ("undefined reference to
+        % cblas_dgemm", confirmed via `mex -v`). $LINKLIBS lands after
+        % the objects (alongside -lmx/-lmex/-lm/...), which is where a
+        % static archive needs to be.
         mkl_libdir = fullfile(mkl_root, 'lib', 'intel64');
         if ~exist(mkl_libdir, 'dir')
             mkl_libdir = fullfile(mkl_root, 'lib');
         end
         inc_flags = [inc_flags, {['-I' fullfile(mkl_root, 'include')], '-DUSE_MKL_CBLAS'}];
-        extra_flags = {sprintf(['LDFLAGS=$LDFLAGS -Wl,--start-group ' ...
+        extra_flags = {sprintf(['LINKLIBS=$LINKLIBS -Wl,--start-group ' ...
             '%1$s/libmkl_intel_lp64.a %1$s/libmkl_sequential.a %1$s/libmkl_core.a ' ...
             '-Wl,--end-group -Wl,--exclude-libs=ALL -lpthread -lm -ldl'], mkl_libdir)};
     elseif isunix
