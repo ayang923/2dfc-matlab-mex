@@ -12,7 +12,7 @@ else ifdef MKLROOT
         MKL_LIBDIR := $(MKLROOT)/lib
     endif
     CFLAGS += -DUSE_MKL_CBLAS -I$(MKLROOT)/include
-    LDFLAGS += -L$(MKL_LIBDIR) -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl
+    LDFLAGS += -Wl,--start-group $(MKL_LIBDIR)/libmkl_intel_lp64.a $(MKL_LIBDIR)/libmkl_sequential.a $(MKL_LIBDIR)/libmkl_core.a -Wl,--end-group -Wl,--exclude-libs=ALL -lpthread -lm -ldl
 else
     LDFLAGS += -lopenblas -lm
 endif

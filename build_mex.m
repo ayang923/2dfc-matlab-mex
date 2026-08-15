@@ -62,13 +62,28 @@ function build_mex()
         % Linux/other with no OpenBLAS available: use MKL's LP64 CBLAS
         % interface instead (set via `module load mkl...`, which exports
         % $MKLROOT). Plain int throughout, no MKL_INT/ILP64 involved.
+        %
+        % MATLAB itself already has its own (likely different-version)
+        % MKL + OpenMP runtime loaded in-process (bin/glnxa64/mkl.so,
+        % .../libiomp5.so). Dynamically linking a second MKL into the mex
+        % file is unsafe: Fortran BLAS symbol names (dgemm_, sgemm_, ...)
+        % are identical across MKL builds, so the dynamic linker can
+        % resolve our mex's calls against MATLAB's already-loaded copy
+        % instead of ours, crashing on the version/threading mismatch
+        % (seen in practice: a "sequential"-linked mex ending up inside
+        % MATLAB's *threaded* mkl.so + libiomp5.so and segfaulting).
+        % Statically linking MKL and hiding its symbols from the mex
+        % file's exported dynamic symbol table (--exclude-libs) avoids
+        % this entirely -- our mex never touches the process-wide symbol
+        % table for these names, so it can't collide either direction.
         mkl_libdir = fullfile(mkl_root, 'lib', 'intel64');
         if ~exist(mkl_libdir, 'dir')
             mkl_libdir = fullfile(mkl_root, 'lib');
         end
         inc_flags = [inc_flags, {['-I' fullfile(mkl_root, 'include')], '-DUSE_MKL_CBLAS'}];
-        extra_flags = {sprintf(['LDFLAGS=$LDFLAGS -L%s -Wl,--no-as-needed ' ...
-            '-lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl'], mkl_libdir)};
+        extra_flags = {sprintf(['LDFLAGS=$LDFLAGS -Wl,--start-group ' ...
+            '%1$s/libmkl_intel_lp64.a %1$s/libmkl_sequential.a %1$s/libmkl_core.a ' ...
+            '-Wl,--end-group -Wl,--exclude-libs=ALL -lpthread -lm -ldl'], mkl_libdir)};
     elseif isunix
         extra_flags = {'-lopenblas'};
     else
