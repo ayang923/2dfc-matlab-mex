@@ -57,7 +57,7 @@ addpath('/Users/allenyang/Documents/2dfc-paper/fully-adaptive-poisson');
 setup;
 
 % rounded geometry
-eps_reg = 1e-3;
+eps_reg = 1e-6;
 g   = @(t) sqrt(sin(t/2).^2 + eps_reg^2);
 z   = @(t) -1/4*sin(t) - 1i*g(t);
 dz  = @(t) -1/4*cos(t) - 1i*sin(t)./(4*g(t));
@@ -66,9 +66,8 @@ dzz = @(t) 1/4*sin(t) + 1i*(sin(t).^2 - 4*cos(t).*g(t).^2)./(16*g(t).^3);
 
 n = 16;
 
-geom_tol = 1e-11;
-
-tol = 1e-13;
+tol = 1e-7;
+geom_tol = tol;
 
 opts = [];
 opts.debug = true;
@@ -76,8 +75,8 @@ opts.n_re  = 2*n;
 opts.n_sem = [n 2*n];
 opts.n_box = n;
 opts.beta = 1;
-opts.stripWidth = 0.9;
-opts.boxToStripRatio = 0.25;
+opts.stripWidth = 0.5;
+opts.boxToStripRatio = 0.5;
 opts.tol = tol;
 solve_opts = [];
 solve_opts.tol = tol;
