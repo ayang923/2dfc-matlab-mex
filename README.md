@@ -291,6 +291,10 @@ or `mex/`.
 
 - **macOS**: links against `-framework Accelerate`. No setup needed.
 - **Linux**: links against `-lopenblas` (`apt install libopenblas-dev` or equivalent).
+- **Linux, no OpenBLAS available**: if `$MKLROOT` is set (e.g. via `module load mkl...` on an
+  HPC cluster), `build_mex.m`/`csrc/Makefile` automatically use MKL's LP64 CBLAS interface instead
+  (`-DUSE_MKL_CBLAS`, see `csrc/include/blas_compat.h`) — still plain `int` throughout, not
+  `MKL_INT`/ILP64, so no other code changes are needed.
 - **Windows**: also targets `-lopenblas`; provide an OpenBLAS-compatible `cblas.lib` on the linker
   path.
 

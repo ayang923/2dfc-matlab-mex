@@ -5,6 +5,14 @@ LDFLAGS =
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
     LDFLAGS += -framework Accelerate
+else ifdef MKLROOT
+    ifneq ($(wildcard $(MKLROOT)/lib/intel64),)
+        MKL_LIBDIR := $(MKLROOT)/lib/intel64
+    else
+        MKL_LIBDIR := $(MKLROOT)/lib
+    endif
+    CFLAGS += -DUSE_MKL_CBLAS -I$(MKLROOT)/include
+    LDFLAGS += -L$(MKL_LIBDIR) -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl
 else
     LDFLAGS += -lopenblas -lm
 endif

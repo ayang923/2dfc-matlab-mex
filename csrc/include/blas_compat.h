@@ -8,6 +8,10 @@
  *   - macOS:  the system Accelerate framework (-framework Accelerate)
  *   - Linux/other: OpenBLAS, or any other library shipping <cblas.h>
  *     (e.g. `apt install libopenblas-dev`), linked with -lopenblas or -lcblas
+ *   - Linux/other, no OpenBLAS available: MKL's LP64 CBLAS interface
+ *     (`-DUSE_MKL_CBLAS`, set automatically by build_mex.m/csrc/Makefile
+ *     when $MKLROOT is set). This still uses plain `int` throughout (MKL's
+ *     default LP64 interface), not MKL_INT/ILP64, so it's a drop-in swap.
  *
  * No LAPACK/LAPACKE dependency is needed anywhere in this port -- see
  * patch_kernels.c for the one 2x2 linear solve, which is hand-rolled.
@@ -20,6 +24,8 @@
         #define ACCELERATE_NEW_LAPACK
     #endif
     #include <Accelerate/Accelerate.h>
+#elif defined(USE_MKL_CBLAS)
+    #include <mkl.h>
 #else
     #include <cblas.h>
 #endif

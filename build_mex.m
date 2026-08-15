@@ -54,9 +54,21 @@ function build_mex()
         'ie_u_num_batch_mex',                       poisson_out_dir};
 
     inc_flags = {['-I' csrc_inc], ['-I' mex_dir]};
+    mkl_root = getenv('MKLROOT');
 
     if ismac
         extra_flags = {'LDFLAGS=$LDFLAGS -framework Accelerate'};
+    elseif ~isempty(mkl_root)
+        % Linux/other with no OpenBLAS available: use MKL's LP64 CBLAS
+        % interface instead (set via `module load mkl...`, which exports
+        % $MKLROOT). Plain int throughout, no MKL_INT/ILP64 involved.
+        mkl_libdir = fullfile(mkl_root, 'lib', 'intel64');
+        if ~exist(mkl_libdir, 'dir')
+            mkl_libdir = fullfile(mkl_root, 'lib');
+        end
+        inc_flags = [inc_flags, {['-I' fullfile(mkl_root, 'include')], '-DUSE_MKL_CBLAS'}];
+        extra_flags = {['-L' mkl_libdir], '-Wl,--no-as-needed', ...
+            '-lmkl_intel_lp64', '-lmkl_sequential', '-lmkl_core', '-lpthread', '-lm', '-ldl'};
     elseif isunix
         extra_flags = {'-lopenblas'};
     else
