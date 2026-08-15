@@ -89,10 +89,19 @@ function build_mex()
         if ~exist(mkl_libdir, 'dir')
             mkl_libdir = fullfile(mkl_root, 'lib');
         end
+        % -z nodelete: statically linking MKL into a file that gets
+        % dlopen'd (as every mex gateway does) crashes at process exit
+        % otherwise -- MKL's internal teardown/atexit state gets torn
+        % down in the wrong order relative to MATLAB's own dlclose of the
+        % mex file, even though the actual computation is correct (seen
+        % in practice: correct results printed, then a segfault during
+        % MATLAB's own shutdown). -z nodelete keeps the mex file's code
+        % mapped for the rest of the process's life so it's never
+        % unloaded, sidestepping the teardown-order crash entirely.
         inc_flags = [inc_flags, {['-I' fullfile(mkl_root, 'include')], '-DUSE_MKL_CBLAS'}];
         extra_flags = {sprintf(['LINKLIBS=$LINKLIBS -Wl,--start-group ' ...
             '%1$s/libmkl_intel_lp64.a %1$s/libmkl_sequential.a %1$s/libmkl_core.a ' ...
-            '-Wl,--end-group -Wl,--exclude-libs=ALL -lpthread -lm -ldl'], mkl_libdir)};
+            '-Wl,--end-group -Wl,--exclude-libs=ALL -Wl,-z,nodelete -lpthread -lm -ldl'], mkl_libdir)};
     elseif isunix
         extra_flags = {'-lopenblas'};
     else
